@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/Roman-Mitusov/selenosis-sidecar/proxy"
+	httpreverseproxy "github.com/Roman-Mitusov/middleware/proxy/http"
 	"github.com/Roman-Mitusov/selenosis-sidecar/utils"
 	"github.com/gofiber/fiber/v2"
-	"k8s.io/klog"
 	"net"
 	"net/url"
 	"path"
@@ -44,7 +43,7 @@ func (app *App) HandleSessionCreate(ctx *fiber.Ctx) error {
 		_ = utils.DeleteBrowserPod(app.hostname, app.namespace, app.client)
 	}
 
-	return proxy.ReverseProxy{
+	return (&httpreverseproxy.ReverseProxy{
 		PrepareRequest: func(ctx *fiber.Ctx) error {
 			ctx.Path(app.proxyPath)
 			ctx.Request().URI().SetScheme("http")
@@ -73,19 +72,19 @@ func (app *App) HandleSessionCreate(ctx *fiber.Ctx) error {
 						value, ok := respBody["value"]
 						if !ok {
 							cancel = cancelFunc
-							klog.Errorf("unable to extract sessionId from response")
+							app.logger.Errorf("Unable to extract sessionId from response")
 							return errors.New("selenium protocol")
 						}
 						valueMap, ok := value.(map[string]interface{})
 						if !ok {
 							cancel = cancelFunc
-							klog.Errorf("unable to extract sessionId from response")
+							app.logger.Errorf("Unable to extract sessionId from response")
 							return errors.New("selenium protocol")
 						}
 						sessionId, ok = valueMap["sessionId"].(string)
 						if !ok {
 							cancel = cancelFunc
-							klog.Errorf("unable to extract sessionId from response")
+							app.logger.Errorf("unable to extract sessionId from response")
 							return errors.New("selenium protocol")
 						}
 						respBody["value"].(map[string]interface{})["sessionId"] = app.hostname
@@ -105,24 +104,24 @@ func (app *App) HandleSessionCreate(ctx *fiber.Ctx) error {
 						},
 						ID: sessionId,
 						OnTimeout: onTimeout(app.idleTimeout, func() {
-							klog.Infof("Session timed out: %s, after %.2fs", sessionId, app.idleTimeout.Seconds())
+							app.logger.Warn("Session timed out: %s, after %.2fs", sessionId, app.idleTimeout.Seconds())
 							cancelFunc()
 						}),
 						CancelFunc: cancelFunc,
 					}
 					app.bucket.put(app.hostname, sess)
-					klog.Infof("New session request completed: %s", sessionId)
+					app.logger.Infof("New session request completed: %s", sessionId)
 					return nil
 				}
 				cancel = cancelFunc
-				klog.Errorf("unable to parse response body: %v", err)
+				app.logger.Errorf("unable to parse response body: %v", err)
 				return errors.New("response body parse error")
 			}
 			cancel = cancelFunc
-			klog.Errorf("unable to read response body: %v", err)
+			app.logger.Errorf("unable to read response body: %v", err)
 			return errors.New("response body read error")
 		},
-	}.Proxy(ctx)
+	}).Proxy(ctx)
 
 }
 
@@ -142,7 +141,6 @@ func (app *App) HandleWebDriverRequests(ctx *fiber.Ctx) error {
 
 	fragments := strings.Split(ctx.Path(), "/")
 	id := ctx.Params("sessionId")
-	klog.Infof("The session id coming from URI path is %s", id)
 
 	if id == "" {
 		return respondWithWebDriverError("WebDriver session is not found", "Unable to process request because sessionId is not found", fiber.StatusNotFound, ctx)
@@ -151,7 +149,7 @@ func (app *App) HandleWebDriverRequests(ctx *fiber.Ctx) error {
 	_, ok := app.bucket.get(id)
 
 	if ok {
-		return proxy.ReverseProxy{
+		return (&httpreverseproxy.ReverseProxy{
 			PrepareRequest: func(c *fiber.Ctx) error {
 				r := c.Request()
 				c.Request().URI().SetScheme("http")
@@ -161,20 +159,20 @@ func (app *App) HandleWebDriverRequests(ctx *fiber.Ctx) error {
 					defer app.bucket.Unlock()
 					select {
 					case <-sess.OnTimeout:
-						klog.Infof("session %s timed out", id)
+						app.logger.Warnf("Session %s timed out", id)
 					default:
 						close(sess.OnTimeout)
 					}
 
 					if c.Method() == fiber.MethodDelete && len(fragments) == 5 {
 						cancel = sess.CancelFunc
-						klog.Infof("session %s delete request", id)
+						app.logger.Infof("session %s delete request", id)
 					} else {
 						sess.OnTimeout = onTimeout(app.idleTimeout, func() {
-							klog.Infof("session timed out: %s, after %.2fs", id, app.idleTimeout.Seconds())
+							app.logger.Warnf("session timed out: %s, after %.2fs", id, app.idleTimeout.Seconds())
 							err := utils.DeleteBrowserPod(app.hostname, app.namespace, app.client)
 							if err != nil {
-								klog.Errorf("Unable to delete pod for session %s with error: %v", id, err)
+								app.logger.Errorf("Unable to delete pod for session %s with error: %v", id, err)
 							}
 						})
 
@@ -191,10 +189,10 @@ func (app *App) HandleWebDriverRequests(ctx *fiber.Ctx) error {
 					}
 					c.Request().URI().SetHost(sess.URL.Host)
 					c.Path(path.Clean(path.Join(sess.URL.Path, strings.Join(fragments[5:], "/"))))
-					klog.Info("proxy session")
+					app.logger.Info("Proxy session")
 					return nil
 				}
-				klog.Warningf("Unknown session %s", id)
+				app.logger.Errorf("Unknown session %s", id)
 				return fmt.Errorf("bad session id %s", id)
 			},
 			HandleError: func(c *fiber.Ctx) error {
@@ -218,9 +216,9 @@ func (app *App) HandleWebDriverRequests(ctx *fiber.Ctx) error {
 				}
 				return nil
 			},
-		}.Proxy(ctx)
+		}).Proxy(ctx)
 	} else {
-		klog.Error("Unable to find session")
+		app.logger.Error("Unable to find session")
 		return respondWithWebDriverError("WebDriver session is not found", "Unable to process request because sessionId is not found", fiber.StatusNotFound, ctx)
 	}
 
@@ -246,7 +244,7 @@ func (app *App) proxy(ctx *fiber.Ctx, port string) error {
 	id := ctx.Params("sessionId")
 
 	if id == "" {
-		klog.Errorf("session id not found")
+		app.logger.Errorf("Session id not found")
 		return respondWithWebDriverError("WebDriver session is not found", "Unable to process request because sessionId is not found", fiber.StatusNotFound, ctx)
 	}
 
@@ -255,21 +253,21 @@ func (app *App) proxy(ctx *fiber.Ctx, port string) error {
 	_, ok := app.bucket.get(id)
 
 	if ok {
-		return proxy.ReverseProxy{
+		return (&httpreverseproxy.ReverseProxy{
 			PrepareRequest: func(c *fiber.Ctx) error {
 				c.Request().URI().SetScheme("http")
 				c.Request().URI().SetHost(net.JoinHostPort(app.hostname, port))
 				c.Path(remainingPath)
-				klog.Infof("proxying %s", fragments[1])
+				app.logger.Infof("proxying %s", fragments[1])
 				return nil
 			},
 			HandleError: func(c *fiber.Ctx) error {
-				klog.Infof("proxying %s error", fragments[1])
+				app.logger.Errorf("proxying %s error", fragments[1])
 				return c.SendStatus(fiber.StatusBadGateway)
 			},
-		}.Proxy(ctx)
+		}).Proxy(ctx)
 	} else {
-		klog.Infof("unknown session: %s", id)
+		app.logger.Errorf("Unknown session: %s", id)
 		return respondWithWebDriverError("WebDriver session is not found", "Unable to process request because sessionId is not found", fiber.StatusNotFound, ctx)
 	}
 }
