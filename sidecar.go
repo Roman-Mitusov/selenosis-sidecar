@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 	"time"
 )
@@ -15,6 +16,7 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	Storage         *Storage
 	Client          *kubernetes.Clientset
+	Logger          *logrus.Logger
 }
 
 //App ...
@@ -27,6 +29,7 @@ type App struct {
 	shutdownTimeout time.Duration
 	bucket          *Storage
 	client          *kubernetes.Clientset
+	logger          *logrus.Logger
 }
 
 //New ...
@@ -40,5 +43,6 @@ func New(conf *Config) *App {
 		shutdownTimeout: conf.ShutdownTimeout,
 		bucket:          conf.Storage,
 		client:          conf.Client,
+		logger:          conf.Logger,
 	}
 }
