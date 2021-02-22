@@ -8,9 +8,9 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
 	"k8s.io/utils/pointer"
 	"os"
 	"os/signal"
@@ -37,26 +37,28 @@ func command() *cobra.Command {
 		Short: "sidecar proxy for selenosis",
 		Run: func(cmd *cobra.Command, args []string) {
 			var err error
+			log := logrus.New()
+			log.Formatter = &logrus.JSONFormatter{}
 
 			hostname, err := os.Hostname()
 			if err != nil {
-				klog.Errorf("can't get container hostname: %v", err)
+				log.Fatalf("Can't get container hostname: %v", err)
 			}
 
-			klog.Infof("Starting selenosis sidecar proxy %s", buildVersion)
+			log.Infof("Starting selenosis sidecar proxy %s", buildVersion)
 
 			client, err := utils.BuildClusterClient()
 			if err != nil {
-				klog.Errorf("Failed to build kubernetes client: %v", err)
+				log.Fatalf("Failed to build kubernetes client: %v", err)
 			}
 
 			ctx := context.Background()
 			_, err = client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 			if err != nil {
-				klog.Infof("Failed to get namespace: %s: %v", namespace, err)
+				log.Fatalf("Failed to get namespace: %s: %v", namespace, err)
 			}
 
-			klog.Info("Kubernetes client successfully created")
+			log.Info("Kubernetes client successfully created")
 
 			storage := sidecar.NewStorage()
 
@@ -69,6 +71,7 @@ func command() *cobra.Command {
 				ShutdownTimeout: shutdownTimeout,
 				Storage:         storage,
 				Client:          client,
+				Logger:          log,
 			})
 
 			router := fiber.New(fiber.Config{
@@ -100,7 +103,7 @@ func command() *cobra.Command {
 
 			go func() {
 				_ = <-stop
-				klog.Info("Gracefully shutting down...")
+				log.Info("Gracefully shutting down...")
 				_ = router.Shutdown()
 			}()
 
@@ -119,7 +122,7 @@ func command() *cobra.Command {
 						_ = client.CoreV1().Pods(namespace).Delete(ctx, hostname, metav1.DeleteOptions{
 							GracePeriodSeconds: pointer.Int64Ptr(15),
 						})
-						klog.Info("Session wait timeout exceeded")
+						log.Warn("Session wait timeout exceeded")
 						break loop
 					case <-ticker:
 						if storage.IsEmpty() {
@@ -132,10 +135,10 @@ func command() *cobra.Command {
 
 			select {
 			case err := <-e:
-				klog.Fatalf("Failed to start selenosis sidecar proxy: %v", err)
+				log.Fatalf("Failed to start selenosis sidecar proxy: %v", err)
 			case <-stop:
 				shuttingDown = true
-				klog.Info("Stopping selenosis sidecar proxy")
+				log.Info("Stopping selenosis sidecar proxy")
 			}
 		},
 	}
